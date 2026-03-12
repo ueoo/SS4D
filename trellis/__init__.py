@@ -1,4 +1,6 @@
 from . import models
+from . import datasets
+from . import trainers
 from . import modules
 from . import pipelines
 from . import renderers

@@ -19,9 +19,12 @@ __attributes = {
     'ElasticSLatFlowModel': 'structured_latent_flow',
 
     'SparseStructureFlow4DModel': 'sparse_structure_flow_4d',
+    'LoRASparseStructureFlow4DModel': 'lora_wrappers',
 
     'SLatFlow4DModel': 'structured_latent_flow_4d',
     'ElasticSLatFlow4DModel': 'structured_latent_flow_4d',
+    'LoRASLatFlow4DModel': 'lora_wrappers',
+    'LoRAElasticSLatFlow4DModel': 'lora_wrappers',
 }
 
 __submodules = []
@@ -99,4 +102,9 @@ if __name__ == '__main__':
         ElasticSLatFlowModel,
     )
 
+    from .lora_wrappers import (
+        LoRAElasticSLatFlow4DModel,
+        LoRASLatFlow4DModel,
+        LoRASparseStructureFlow4DModel,
+    )
     from .sparse_structure_flow_4d import SparseStructureFlow4DModel

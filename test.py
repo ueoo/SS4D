@@ -84,8 +84,8 @@ def render_samples(samples, exts, ints):
     return images
 
 
-# pipeline = TrellisVideoTo4DPipeline.from_pretrained("lizb6626/SS4D")
-pipeline = TrellisVideoTo4DPipeline.from_pretrained("/mnt/petrelfs/zhangmengchen/lizb/SS4D_ckpt") # load locally
+pipeline = TrellisVideoTo4DPipeline.from_pretrained("lizb6626/SS4D")
+# pipeline = TrellisVideoTo4DPipeline.from_pretrained("/mnt/petrelfs/zhangmengchen/lizb/SS4D_ckpt") # load locally
 pipeline.cuda()
 
 output_dir = opt.output_dir
