@@ -70,7 +70,9 @@ def _frame_idx_from_name(name: str) -> Optional[int]:
     return None
 
 
-def load_view_sequence(view_root: Path, max_frames: Optional[int]) -> Tuple[List[Image.Image], List[int], List[str], dict]:
+def load_view_sequence(
+    view_root: Path, max_frames: Optional[int], frame_step: int = 1
+) -> Tuple[List[Image.Image], List[int], List[str], dict]:
     transforms_path = view_root / "transforms.json"
     if not transforms_path.exists():
         raise FileNotFoundError(f"missing transforms json: {transforms_path}")
@@ -82,14 +84,18 @@ def load_view_sequence(view_root: Path, max_frames: Optional[int]) -> Tuple[List
         raise ValueError(f"no frames in {transforms_path}")
     if max_frames is not None and max_frames <= 0:
         raise ValueError("--max_frames must be > 0 when provided")
+    if frame_step <= 0:
+        raise ValueError("--frame_step must be > 0 when provided")
 
     images: List[Image.Image] = []
     frame_indices: List[int] = []
     file_names: List[str] = []
 
-    for i, meta in enumerate(frame_metas):
+    # Subsample: indices 0, frame_step, 2*frame_step, ... up to max_frames.
+    for idx in range(0, len(frame_metas), frame_step):
         if max_frames is not None and len(images) >= max_frames:
             break
+        meta = frame_metas[idx]
         rel = meta.get("file_path", "")
         rel = rel.replace("./", "")
         img_path = view_root / rel
@@ -107,7 +113,7 @@ def load_view_sequence(view_root: Path, max_frames: Optional[int]) -> Tuple[List
         if frame_idx is None:
             frame_idx = _frame_idx_from_name(img_path.name)
         if frame_idx is None:
-            frame_idx = i
+            frame_idx = idx
         frame_indices.append(int(frame_idx))
         file_names.append(img_path.name)
 
@@ -151,6 +157,37 @@ def load_camera_from_view(
     return extr, intr, f"view_{view_idx:03d}", resolution
 
 
+def load_camera_from_transforms_path(
+    transforms_path: Path,
+    view_idx: int,
+    resolution_override: Optional[int],
+    camera_distance_scale: float,
+) -> Tuple[torch.Tensor, torch.Tensor, str, int]:
+    """Load a single render camera from an external transforms.json (e.g. GT Blender data)."""
+    if not transforms_path.exists():
+        raise FileNotFoundError(f"missing transforms json: {transforms_path}")
+    with transforms_path.open("r") as f:
+        meta = json.load(f)
+    frames = meta.get("frames", [])
+    if view_idx >= len(frames):
+        raise IndexError(f"view_idx {view_idx} >= len(frames) ({len(frames)}) in {transforms_path}")
+    frame0 = frames[view_idx]
+    fov = frame0.get("camera_angle_x", meta.get("camera_angle_x", None))
+    if fov is None:
+        raise KeyError(f"camera_angle_x missing in {transforms_path}")
+    c2w = torch.tensor(frame0["transform_matrix"]).float().cuda()
+    c2w[:3, 3] *= float(camera_distance_scale)
+    c2w[:3, 1:3] *= -1
+    extr = torch.inverse(c2w)
+    intr = utils3d.torch.intrinsics_from_fov_xy(torch.tensor(fov).float().cuda(), torch.tensor(fov).float().cuda())
+    default_h = meta.get("h", 512)
+    default_w = meta.get("w", 512)
+    resolution = int(min(int(default_h), int(default_w)))
+    if resolution_override is not None:
+        resolution = int(resolution_override)
+    return extr, intr, f"view_{view_idx:03d}", resolution
+
+
 def render_rgba_from_black_white(sample, extrinsics, intrinsics, resolution: int):
     render_black = render_utils.render_frames(
         sample, extrinsics, intrinsics, {"resolution": resolution, "bg_color": (0, 0, 0)}, verbose=False
@@ -186,10 +223,17 @@ def main(args: argparse.Namespace) -> None:
     available_views = list_available_views(sample_root)
     if args.input_view_idx not in available_views:
         raise ValueError(f"input view {args.input_view_idx} not found in {available_views}")
-    render_view_idxs = parse_view_indices(args.render_view_idxs, available_views)
+
+    use_external_render_camera = args.render_transforms_path is not None and args.render_view_idx is not None
+    if use_external_render_camera:
+        render_view_idxs = [args.render_view_idx]
+    else:
+        render_view_idxs = parse_view_indices(args.render_view_idxs, available_views)
 
     input_view_root = sample_root / f"view_{args.input_view_idx:03d}"
-    input_images, frame_indices, source_names, _ = load_view_sequence(input_view_root, args.max_frames)
+    input_images, frame_indices, source_names, _ = load_view_sequence(
+        input_view_root, args.max_frames, args.frame_step
+    )
 
     print("=== Configuration ===")
     print(f"sample_root      : {sample_root}")
@@ -213,14 +257,26 @@ def main(args: argparse.Namespace) -> None:
     ints = []
     view_names = []
     res_candidates = []
-    for view_idx in render_view_idxs:
-        ext, intr, name, resolution = load_camera_from_view(
-            sample_root, view_idx, args.resolution, args.camera_distance_scale
+    if use_external_render_camera:
+        ext, intr, name, resolution = load_camera_from_transforms_path(
+            Path(args.render_transforms_path),
+            args.render_view_idx,
+            args.resolution,
+            args.camera_distance_scale,
         )
         exts.append(ext)
         ints.append(intr)
         view_names.append(name)
         res_candidates.append(resolution)
+    else:
+        for view_idx in render_view_idxs:
+            ext, intr, name, resolution = load_camera_from_view(
+                sample_root, view_idx, args.resolution, args.camera_distance_scale
+            )
+            exts.append(ext)
+            ints.append(intr)
+            view_names.append(name)
+            res_candidates.append(resolution)
     render_resolution = int(min(res_candidates))
 
     per_view_rgb_video = {name: [] for name in view_names}
@@ -274,6 +330,18 @@ if __name__ == "__main__":
         help="Comma-separated view idxs for rendering (default: all available views).",
     )
     parser.add_argument(
+        "--render_transforms_path",
+        type=str,
+        default=None,
+        help="Path to external transforms.json (e.g. GT Blender) for render camera. Use with --render_view_idx.",
+    )
+    parser.add_argument(
+        "--render_view_idx",
+        type=int,
+        default=None,
+        help="View index into --render_transforms_path for render camera. When set with --render_transforms_path, overrides --render_view_idxs.",
+    )
+    parser.add_argument(
         "--pipeline_path",
         type=str,
         default="lizb6626/SS4D",
@@ -281,6 +349,12 @@ if __name__ == "__main__":
     )
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--max_frames", type=int, default=None, help="Optional max number of input frames.")
+    parser.add_argument(
+        "--frame_step",
+        type=int,
+        default=1,
+        help="Subsample input frames: take indices 0, frame_step, 2*frame_step, ... (default 1). E.g. 5 gives 10 frames from 0..48.",
+    )
     parser.add_argument(
         "--resolution",
         type=int,
@@ -290,7 +364,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--camera_distance_scale",
         type=float,
-        default=1.3,
+        default=1.0,
         help="Scale factor for camera distance to origin. >1.0 moves camera farther away.",
     )
     parser.add_argument("--output_dir", type=str, required=True, help="Output directory for predicted renders.")
